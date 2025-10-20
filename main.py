@@ -62,6 +62,10 @@ def word_count(data:str)->int:
     words= re.findall(r'\b\w+\b',data)
     return len(words)
 
+@app.get("/")
+def root():
+    return {"message": "Hello, world!"}
+
 @app.post("/strings/", response_model=StoredString)
 async def create_string(req: CreateRequest):
     try:
