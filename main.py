@@ -72,9 +72,8 @@ async def create_string(req: CreateRequest):
         if not req.value:
             raise HTTPException(status_code=400,detail="Missing 'value' field")
         value = req.value
-        if not isinstance(value, str):
-            raise HTTPException(status_code=422, detail=f"Invalid data type for {value}, must be a string")
-        if value in string_db:
+        # Pydantic already enforces that value is a string, so no need to check its type
+        if any(stored.value == value for stored in string_db.values()):
             raise HTTPException(status_code=409, detail="String already exists in the system")
         sha = generate_sha_256(value)
         props = Properties(
