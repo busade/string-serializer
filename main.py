@@ -66,9 +66,11 @@ def word_count(data:str)->int:
 def root():
     return {"message": "Hello, world!"}
 
-@app.post("/strings/", response_model=StoredString)
+@app.post("/strings/", response_model=StoredString, status_code=201)
 async def create_string(req: CreateRequest):
     try:
+        if not req.value:
+            raise HTTPException(status_code=400,detail="Missing 'value' field")
         value = req.value
         if not isinstance(value, str):
             raise HTTPException(status_code=422, detail=f"Invalid data type for {value}, must be a string")
@@ -90,7 +92,9 @@ async def create_string(req: CreateRequest):
             created_at=datetime.utcnow().isoformat() + "Z"
         )
         string_db[sha] = stored
-        return stored
+        return  stored
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 async def get_string(hash_id:str):
@@ -207,9 +211,9 @@ async def filter_by_natural_language(query: str):
 
 
 
-@app.delete("/strings/{hash_id}")
+@app.delete("/strings/{hash_id}" status_code=204)
 async def delete_string(hash_id: str):
     if hash_id not in string_db:
         raise HTTPException(status_code=404, detail="String not found")
     del string_db[hash_id]
-    return {"message": "String deleted"}
+    return None
