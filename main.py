@@ -97,6 +97,9 @@ async def create_string(req: CreateRequest):
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/strings/{hash_id}", response_model= StoredString, status_code=200)
 async def get_string(hash_id:str):
     if hash_id not in string_db:
         raise HTTPException(status_code=404, detail="String  not found")
