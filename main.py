@@ -1,13 +1,16 @@
-from fastapi import FastAPI,HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-from typing import Dict, Optional,List
-import hashlib, re
+from typing import Dict, Optional, List
+import hashlib
+import re
 from datetime import datetime
+import json
+import os
+from urllib.parse import unquote_plus
 
+app = FastAPI(title="String Analysis API")
 
-app=FastAPI()
-
-
+# ----- Pydantic models -----
 class CreateRequest(BaseModel):
     value: str
 
@@ -25,105 +28,169 @@ class StoredString(BaseModel):
     properties: Properties
     created_at: str
 
-string_db: Dict[str,StoredString]={}
+# ----- In-memory DB + persistence -----
+string_db: Dict[str, StoredString] = {}
+DB_FILE = "string_db.json"
 
-def generate_sha_256(data:str)-> str:
-    """Generate the sha_256 for a given string"""
-    sha_256= hashlib.sha256()
-    # update the sha_256 with the data passed
-    sha_256.update(data.encode('utf-8'))
+def save_db() -> None:
+    try:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            # store Pydantic dicts
+            json.dump({k: v.dict() for k, v in string_db.items()}, f, indent=2, ensure_ascii=False)
+    except Exception:
+        # avoid crashing on save failure; log in real app
+        pass
 
+def load_db() -> None:
+    if not os.path.exists(DB_FILE):
+        return
+    try:
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for k, v in data.items():
+                string_db[k] = StoredString(**v)
+    except Exception:
+        # ignore malformed DB for now
+        pass
+
+@app.on_event("startup")
+def on_startup():
+    load_db()
+
+@app.on_event("shutdown")
+def on_shutdown():
+    save_db()
+
+# ----- Utilities -----
+def generate_sha_256(data: str) -> str:
+    sha_256 = hashlib.sha256()
+    sha_256.update(data.encode("utf-8"))
     return sha_256.hexdigest()
 
+def clean_for_char_ops(data: str) -> str:
+    # remove non-word chars and underscores, make lowercase
+    return re.sub(r'[\W_]+', '', data.lower())
 
-def palindrome(data:str)-> str:
-    """check if a given string is palindrome"""
-    clean_data= re.sub(r'[^a-z0-9]', '', data.lower())
-    return clean_data== clean_data[::-1]
+def palindrome(data: str) -> bool:
+    clean_data = clean_for_char_ops(data)
+    return clean_data == clean_data[::-1]
 
-
-
-def char_count(data:str)-> dict[str:int]:
-    """Count occurence of charaters in a string  and returns  string"""
-    chars={}
-    clean_data= re.sub(r'[^a-z0-9]', '', data.lower())
-    for char in clean_data:
-        chars[char]=chars.get(char,0)+1
+def char_count(data: str) -> Dict[str, int]:
+    chars: Dict[str, int] = {}
+    clean_data = clean_for_char_ops(data)
+    for ch in clean_data:
+        chars[ch] = chars.get(ch, 0) + 1
     return chars
 
-def unique_char(data:str)-> int:
-    """Find the character that does not occur more than once"""
-    chars=char_count(data)
-    unique_count = len([char for char, count in chars.items() if count == 1])
-    return unique_count
+def unique_characters_count(data: str) -> int:
+    # distinct characters (case-insensitive; non-word filtered)
+    return len(char_count(data).keys())
 
-def word_count(data:str)->int:
-    """counts number of words in the input"""
-    words= re.findall(r'\b\w+\b',data)
-    return len(words)
+def word_count(data: str) -> int:
+    # words separated by whitespace
+    if not data or not data.strip():
+        return 0
+    return len(data.split())
 
-@app.get("/")
+# ----- Endpoints -----
+
+@app.get("/", summary="API root")
 def root():
-    return {"message": "Hello, world!"}
+    return {
+        "message": "String Analysis API",
+        "endpoints": ["/strings (POST, GET)", "/strings/{id_or_value} (GET, DELETE)", "/strings/filter-by-natural-language"]
+    }
 
 @app.post("/strings", response_model=StoredString, status_code=201)
 async def create_string(req: CreateRequest):
-    try:
-        if not req.value:
-            raise HTTPException(status_code=400,detail="Missing 'value' field")
-        value = req.value
-        # Pydantic already enforces that value is a string, so no need to check its type
-        if any(stored.value == value for stored in string_db.values()):
-            raise HTTPException(status_code=409, detail="String already exists in the system")
-        sha = generate_sha_256(value)
-        props = Properties(
-            length=len(value),
-            is_palindrome=palindrome(value),
-            unique_characters=unique_char(value),
-            word_count=word_count(value),
-            sha256_hash=sha,
-            character_frequency_map=char_count(value)
-        )
-        stored = StoredString(
-            id=sha,
-            value=value,
-            properties=props,
-            created_at=datetime.utcnow().isoformat() + "Z"
-        )
-        string_db[sha] = stored
-        return  stored
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
+    if req.value is None:
+        raise HTTPException(status_code=400, detail="Missing 'value' field")
+    if not isinstance(req.value, str):
+        raise HTTPException(status_code=422, detail="'value' must be a string")
 
-@app.get("/strings/{hash_id}", response_model= StoredString, status_code=200)
-async def get_string(hash_id:str):
-    if hash_id not in string_db:
-        raise HTTPException(status_code=404, detail="String  not found")
-    return string_db[hash_id]
+    value = req.value
+    # check duplicates by exact string match
+    if any(stored.value == value for stored in string_db.values()):
+        raise HTTPException(status_code=409, detail="String already exists in the system")
 
+    sha = generate_sha_256(value)
+    props = Properties(
+        length=len(value),
+        is_palindrome=palindrome(value),
+        unique_characters=unique_characters_count(value),
+        word_count=word_count(value),
+        sha256_hash=sha,
+        character_frequency_map=char_count(value),
+    )
+    created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    stored = StoredString(id=sha, value=value, properties=props, created_at=created_at)
+    string_db[sha] = stored
 
-@app.get("/strings")
+    # persist
+    save_db()
+
+    return stored
+
+@app.get("/strings/{id_or_value}", response_model=StoredString, status_code=200)
+async def get_string(id_or_value: str):
+    # decode in case user provided URL-encoded value
+    identifier = unquote_plus(id_or_value)
+
+    # 1. try treat as SHA key
+    if identifier in string_db:
+        return string_db[identifier]
+
+    # 2. try find by exact value
+    for st in string_db.values():
+        if st.value == identifier:
+            return st
+
+    raise HTTPException(status_code=404, detail="String not found")
+
+@app.delete("/strings/{id_or_value}", status_code=204)
+async def delete_string(id_or_value: str):
+    identifier = unquote_plus(id_or_value)
+
+    # delete by SHA
+    if identifier in string_db:
+        del string_db[identifier]
+        save_db()
+        return None
+
+    # delete by value (first match)
+    found_key = None
+    for k, v in string_db.items():
+        if v.value == identifier:
+            found_key = k
+            break
+    if found_key:
+        del string_db[found_key]
+        save_db()
+        return None
+
+    raise HTTPException(status_code=404, detail="String not found")
+
+@app.get("/strings", status_code=200)
 async def list_strings(
-    is_palindrome: Optional[bool]=None,
-    min_length: Optional[int]=None,
-    max_length: Optional[int]=None,
-    word_count_param:Optional[int]=None,
-    contains_character:Optional[str]=None
+    is_palindrome: Optional[bool] = Query(None),
+    min_length: Optional[int] = Query(None, ge=0),
+    max_length: Optional[int] = Query(None, ge=0),
+    word_count: Optional[int] = Query(None, ge=0),
+    contains_character: Optional[str] = Query(None, min_length=1, max_length=1),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1),
 ):
-    # basic validation
-    if contains_character is not None and len(contains_character) != 1:
-        raise HTTPException(status_code=400, detail="contains_character must be a single character")
+    # validations
     if min_length is not None and max_length is not None and min_length > max_length:
         raise HTTPException(status_code=400, detail="min_length cannot be greater than max_length")
+    if contains_character is not None and len(contains_character) != 1:
+        raise HTTPException(status_code=400, detail="contains_character must be a single character")
 
     applied_filters = {
         "is_palindrome": is_palindrome,
         "min_length": min_length,
         "max_length": max_length,
-        "word_count": word_count_param,
+        "word_count": word_count,
         "contains_character": contains_character,
     }
 
@@ -135,26 +202,25 @@ async def list_strings(
             return False
         if max_length is not None and p.length > max_length:
             return False
-        if word_count_param is not None and p.word_count != word_count_param:
+        if word_count is not None and p.word_count != word_count:
             return False
         if contains_character is not None:
-            # check against cleaned character_frequency_map keys
             if contains_character.lower() not in p.character_frequency_map:
                 return False
         return True
 
-    results = [s for s in string_db.values() if matches(s)]
+    all_results = [s for s in string_db.values() if matches(s)]
+    paginated = all_results[skip: skip + limit]
+
     return {
-        "data": [s.dict() for s in results],
-        "count": len(results),
+        "data": [s.dict() for s in paginated],
+        "count": len(all_results),
+        "returned": len(paginated),
         "filters_applied": applied_filters,
     }
-    
 
-
-# Natural language filtering (simple heuristics)
-@app.get("/strings/filter-by-natural-language")
-async def filter_by_natural_language(query: str):
+@app.get("/strings/filter-by-natural-language", status_code=200)
+async def filter_by_natural_language(query: str = Query(..., min_length=1)):
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="query parameter required")
 
@@ -164,6 +230,8 @@ async def filter_by_natural_language(query: str):
     # heuristics
     if "single word" in q or "single-word" in q:
         parsed["parsed_filters"]["word_count"] = 1
+    if "more than one word" in q or "multiple words" in q:
+        parsed["parsed_filters"]["min_word_count"] = 2
     if "palindrom" in q:  # catches palindromic / palindrome
         parsed["parsed_filters"]["is_palindrome"] = True
 
@@ -171,9 +239,9 @@ async def filter_by_natural_language(query: str):
     if m:
         parsed["parsed_filters"]["min_length"] = int(m.group(1)) + 1
 
-    m2 = re.search(r"contain(?:s|ing)?(?: the letter)?\s+([a-z])", q)
+    m2 = re.search(r"contain(?:s|ing)?(?: the letter)?\s+([a-zA-Z])", q)
     if m2:
-        parsed["parsed_filters"]["contains_character"] = m2.group(1)
+        parsed["parsed_filters"]["contains_character"] = m2.group(1).lower()
 
     if "first vowel" in q:
         # heuristic: first vowel = 'a'
@@ -182,12 +250,10 @@ async def filter_by_natural_language(query: str):
     if not parsed["parsed_filters"]:
         raise HTTPException(status_code=400, detail="Unable to parse natural language query")
 
-    # check for simple conflicts
     pf = parsed["parsed_filters"]
     if "min_length" in pf and "max_length" in pf and pf["min_length"] > pf["max_length"]:
         raise HTTPException(status_code=422, detail="Parsed filters conflict (min_length > max_length)")
 
-    # reuse filtering logic
     def matches_parsed(st: StoredString) -> bool:
         p = st.properties
         if "is_palindrome" in pf and p.is_palindrome != pf["is_palindrome"]:
@@ -204,18 +270,9 @@ async def filter_by_natural_language(query: str):
         return True
 
     results = [s for s in string_db.values() if matches_parsed(s)]
+
     return {
         "data": [s.dict() for s in results],
         "count": len(results),
         "interpreted_query": parsed,
     }
-
-
-
-
-@app.delete("/strings/{hash_id}", status_code=204)
-async def delete_string(hash_id: str):
-    if hash_id not in string_db:
-        raise HTTPException(status_code=404, detail="String not found")
-    del string_db[hash_id]
-    return None
