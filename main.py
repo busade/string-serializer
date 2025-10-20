@@ -211,7 +211,7 @@ async def filter_by_natural_language(query: str):
 
 
 
-@app.delete("/strings/{hash_id}" status_code=204)
+@app.delete("/strings/{hash_id}", status_code=204)
 async def delete_string(hash_id: str):
     if hash_id not in string_db:
         raise HTTPException(status_code=404, detail="String not found")
