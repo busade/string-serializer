@@ -1,5 +1,3 @@
-...existing code...
-
 # String Serializer (FastAPI)
 
 Small FastAPI service that accepts a string, analyzes it (length, palindrome, unique characters, word count, sha256, character frequency) and stores the result in an in-memory database keyed by the SHA-256 hash.
