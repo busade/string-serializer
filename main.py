@@ -66,7 +66,7 @@ def word_count(data:str)->int:
 def root():
     return {"message": "Hello, world!"}
 
-@app.post("/strings/", response_model=StoredString, status_code=201)
+@app.post("/strings", response_model=StoredString, status_code=201)
 async def create_string(req: CreateRequest):
     try:
         if not req.value:
